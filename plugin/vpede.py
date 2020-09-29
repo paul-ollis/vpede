@@ -284,13 +284,11 @@ class QualityServerChannel(channels.JsonChannel):
     # pylint: disable=too-many-instance-attributes
 
     info_popup: vpe.Popup
+    autocmd_group = vpe.AutoCmdGroup('quality')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._clients = []
-        self._active_client_index = -1
         self._menu = None
-        self.autocmd_group = vpe.AutoCmdGroup('quality')
         self._signs = None
         self._reset()
         self.ping_resp = 1
@@ -314,13 +312,14 @@ class QualityServerChannel(channels.JsonChannel):
         sign_hl(group='VPE_qual_other', guifg='blue')
         sg = Sign.get
         self._signs = {
-           'E': sg('qual_error', text='E>', texthl='VPE_qual_error'),
-           'error': sg('qual_error', text='E>', texthl='VPE_qual_error'),
-           'F': sg('qual_fatal', text='F>', texthl='VPE_qual_fatal'),
-           'W': sg('qual_warning', text='W>', texthl='VPE_qual_warning'),
-           'note': sg('qual_warning', text='N>', texthl='VPE_qual_warning'),
-           'R': sg('qual_refactor', text='R>', texthl='VPE_qual_refactor'),
-           'C': sg('qual_convention', text='C>', texthl='VPE_qual_convention'),
+            'E': sg('qual_error', text='E>', texthl='VPE_qual_error'),
+            'error': sg('qual_error', text='E>', texthl='VPE_qual_error'),
+            'F': sg('qual_fatal', text='F>', texthl='VPE_qual_fatal'),
+            'W': sg('qual_warning', text='W>', texthl='VPE_qual_warning'),
+            'note': sg('qual_warning', text='N>', texthl='VPE_qual_warning'),
+            'R': sg('qual_refactor', text='R>', texthl='VPE_qual_refactor'),
+            'C': sg(
+                'qual_convention', text='C>', texthl='VPE_qual_convention'),
         }
         _props = vim.prop_type_list()
         for _name in _props:
@@ -342,7 +341,7 @@ class QualityServerChannel(channels.JsonChannel):
             g.add('BufReadPost', pat='*', func=self.on_buf_read)
             g.add('BufDelete', pat='*', func=self.on_buf_delete)
 
-    def send(self, message: Message, buffer=True) -> None:
+    def send(self, message: Message) -> None:
         """Send a message to the server."""
         if self.is_open:
             # vpe.log(f'Send: {message}')
@@ -422,7 +421,7 @@ class QualityServerChannel(channels.JsonChannel):
             notes.append(create_note(reporter, report))
         info.all_notes[reporter] = notes
 
-    def place_report_signs(self, buf: buffers.Buffer) -> None:
+    def place_report_signs(self, buf: Buffer) -> None:
         """Place signs in buffer for a list of reports.
 
         :buf: The target buffer.
@@ -448,6 +447,11 @@ class QualityServerChannel(channels.JsonChannel):
         info.sign_to_note = sign_to_note
 
     def try_connect(self, _timer) -> None:
+        """"Try to establish a connection to a server.
+
+        This is invoked by a timer. If a connection is already established then
+        the timer is stopped. Otherwise a connection attempt is initiated.
+        """
         if self.is_open and self.conn_timer:
             self.conn_timer.stop()
             self.conn_timer = None
@@ -466,7 +470,7 @@ class QualityServerChannel(channels.JsonChannel):
             self.connect()
         else:
             msg = PingMessage()
-            self.send(msg, buffer=False)
+            self.send(msg)
             self.ping_req = msg.count
 
     @trace

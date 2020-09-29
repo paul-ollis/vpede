@@ -142,7 +142,7 @@ def find_file_here_or_above(
     return None
 
 
-def make_full_path(work_dir: Path, path_name: str) -> str:
+def make_full_path_name(work_dir: Path, path_name: str) -> str:
     """Optionally add work dir to a path name to form an absolute path.
 
     :work_dir:  The working directory to prepend if required.
@@ -154,14 +154,14 @@ def make_full_path(work_dir: Path, path_name: str) -> str:
     return str(path)
 
 
-def fix_report_paths(work_dir: Path, reports: List[dict]):
+def fix_report_path_names(work_dir: Path, reports: List[dict]):
     """Fix all the paths in a quality report, making them absolute.
 
     :work_dir: The working directory where the reports wr generated.
     :reports:  The quality reports.
     """
     for report in reports:
-        report['path'] = make_full_path(work_dir, report['path'])
+        report['path'] = make_full_path_name(work_dir, report['path'])
 
 
 def get_messages(
@@ -256,7 +256,7 @@ class Connection(TaskTracker):
             self.process_requests(), name=f'process {self.number}'))
 
     async def process_requests(self):
-        """Process incoming requests from a connection."""
+        """Process all incoming requests for this connection."""
 
         buf = ''
         decoder = json.JSONDecoder()
@@ -433,7 +433,7 @@ class Server(TaskTracker):
         """
         self.connections.pop(number)
 
-    async def process_message(self, code: str, message: ProtoMessage) -> bool:
+    async def process_message(self, code: str, _message: ProtoMessage) -> bool:
         """Process a single incoming message.
 
         This method assumes that the *message* is well formed.
@@ -473,22 +473,22 @@ class Server(TaskTracker):
                     analyser.remove_file(path)
 
     async def update_reports(
-            self, type_name: str, files: Collection[Path],
+            self, type_name: str, paths: Collection[Path],
             reports: List[dict]):
         """Update the quality reports for a set of files.
 
         :type_name: The name of the type of report; *e.g.* pylint.
-        :files:     A list of the files reported on.
+        :paths:     A list of the file paths reported on.
         :reports:   A list of the reports.
         """
-        all_files = set(report['path'] for report in reports)
-        for name in files:
-            all_files.add(name)
-        reports_by_file = {path_name: [] for path_name in all_files}
+        all_paths = set(Path(report['path']) for report in reports)
+        for path in paths:
+            all_paths.add(path)
+        reports_by_path = {path: [] for path in all_paths}
         for report in reports:
-            reports_by_file[report['path']].append(report)
+            reports_by_path[Path(report['path'])].append(report)
         for conn in list(self.connections.values()):
-            await conn.send_reports(type_name, reports_by_file)
+            await conn.send_reports(type_name, reports_by_path)
 
     def cleanup(self):
         """Perform cleanup of dead tasks, *etc*."""
@@ -501,7 +501,10 @@ class Server(TaskTracker):
         """Perform modification time check for registered files."""
         modified = []
         for path in self.all_files:
-            mtime = path.stat().st_mtime
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
             if mtime > self.mod_times[path]:
                 self.mod_times[path] = mtime
                 modified.append(path)
@@ -560,6 +563,7 @@ class Analyser:
     """
     name: ClassVar[str] = ''
     file_types: ClassVar[Set[str]] = set()
+    excl_suffixes: ClassVar[Set[str]] = set()
     rcname: ClassVar[str] = ''
 
     rc_sets: DefaultDict[Path, Set[Path]]
@@ -603,6 +607,8 @@ class Analyser:
         """
         if type_name not in self.file_types:
             return
+        if path.suffix in self.excl_suffixes:
+            return
         rcpath = find_file_here_or_above(path, self.rcname)
         if rcpath is None:
             return
@@ -628,7 +634,7 @@ class Analyser:
             if rcpath in self.being_scanned:
                 continue
             self.being_scanned[rcpath] = asyncio.create_task(
-                    self.run_scan(rcpath), name=f'scan-{rcpath}')
+                self.run_scan(rcpath), name=f'scan-{rcpath}')
             started.append(rcpath)
         for rcpath in started:
             self.needs_scan.remove(rcpath)
@@ -663,7 +669,7 @@ class Analyser:
             await aproc.wait()
 
         self.op_queue.put_nowait(('complete', rcpath))
-        fix_report_paths(work_dir, reports)
+        fix_report_path_names(work_dir, reports)
         if self.parent is not None:
             await self.parent.update_reports(self.name, paths, reports)
 
@@ -686,11 +692,17 @@ class Analyser:
         """
 
 
-class PyLinter(Analyser):
+class PyAnalyser(Analyser):
+    """Base for all Python code analysers."""
+
+    file_types: ClassVar[Set[str]] = {'python'}
+    excl_suffixes: ClassVar[Set[str]] = {'.pyi'}
+
+
+class PyLinter(PyAnalyser):
     """Management of pylint quality checks."""
 
     name: ClassVar[str] = 'pylint'
-    file_types: ClassVar[Set[str]] = {'python'}
     rcname: ClassVar[str] = 'pylintrc'
 
     def exec_analyser(self, rcpath: Path, files: List[str]):
@@ -700,8 +712,6 @@ class PyLinter(Analyser):
         :files:  The files to be analysed.
         """
         args = ['pylint', f'--rcfile={rcpath}', *files]
-        # log(f'Exec: {" ".join(args)}')
-        # log(f'Cwd:  {str(rcpath.parent)}')
         return asyncio.create_subprocess_exec(
             *args, cwd=str(rcpath.parent), stdout=asyncio.subprocess.PIPE)
 
@@ -717,7 +727,7 @@ class PyLinter(Analyser):
         return {}
 
 
-class PyCodeStyler(Analyser):
+class PyCodeStyler(PyAnalyser):
     """Management of pycodestyle quality checks."""
 
     name: ClassVar[str] = 'pycodestyle'
@@ -746,11 +756,10 @@ class PyCodeStyler(Analyser):
         return {}
 
 
-class MyPyer(Analyser):
+class MyPyer(PyAnalyser):
     """Management of mypy static analysis."""
 
     name: ClassVar[str] = 'mypy'
-    file_types: ClassVar[Set[str]] = {'python'}
     rcname: ClassVar[str] = 'mypy.ini'
 
     def exec_analyser(self, rcpath: Path, files: List[str]):
